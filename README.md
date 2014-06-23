@@ -1,4 +1,4 @@
-[![Build status](https://secure.travis-ci.org/nvie/rq.png?branch=master)](https://secure.travis-ci.org/nvie/rq)
+UPDATE: Update rq/worker.py to remove os.fork() calls so that this code can work on windows.
 
 RQ (_Redis Queue_) is a simple Python library for queueing jobs and processing
 them in the background with workers.  It is backed by Redis and it is designed
