@@ -10,9 +10,10 @@ import signal
 import socket
 import sys
 import time
+import times
 import traceback
 
-from rq.compat import as_text, string_types, text_type
+from rq.compat import as_text, text_type
 
 from .connections import get_current_connection
 from .exceptions import DequeueTimeout, NoQueueError
@@ -20,7 +21,7 @@ from .job import Job, Status
 from .logutils import setup_loghandlers
 from .queue import get_failed_queue, Queue
 from .timeouts import UnixSignalDeathPenalty
-from .utils import import_attribute, make_colorizer, utcformat, utcnow
+from .utils import make_colorizer, utcformat, utcnow
 from .version import VERSION
 
 try:
@@ -109,7 +110,7 @@ class Worker(object):
 
     def __init__(self, queues, name=None,
                  default_result_ttl=None, connection=None,
-                 exc_handler=None, default_worker_ttl=None, job_class=None):  # noqa
+                 exc_handler=None, default_worker_ttl=None):  # noqa
         if connection is None:
             connection = get_current_connection()
         self.connection = connection
@@ -140,11 +141,6 @@ class Worker(object):
         self.push_exc_handler(self.move_to_failed_queue)
         if exc_handler is not None:
             self.push_exc_handler(exc_handler)
-
-        if job_class is not None:
-            if isinstance(job_class, string_types):
-                job_class = import_attribute(job_class)
-            self.job_class = job_class
 
     def validate_queues(self):
         """Sanity check for the given queues."""
@@ -422,7 +418,10 @@ class Worker(object):
         within the given timeout bounds, or will end the work horse with
         SIGALRM.
         """
-        child_pid = os.fork()
+        try:
+            child_pid = os.fork()
+        except:
+            child_pid = 0
         if child_pid == 0:
             self.main_work_horse(job)
         else:
@@ -448,59 +447,42 @@ class Worker(object):
         # that are different from the worker.
         random.seed()
 
-        # Always ignore Ctrl+C in the work horse, as it might abort the
-        # currently running job.
-        # The main worker catches the Ctrl+C and requests graceful shutdown
-        # after the current work is done.  When cold shutdown is requested, it
-        # kills the current job anyway.
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        signal.signal(signal.SIGTERM, signal.SIG_DFL)
-
         self._is_horse = True
-        self.log = logger
 
         success = self.perform_job(job)
 
-        # os._exit() is the way to exit from childs after a fork(), in
-        # constrast to the regular sys.exit()
-        os._exit(int(not success))
+        self._is_horse = False
 
     def perform_job(self, job):
         """Performs the actual work of a job.  Will/should only be called
         inside the work horse's process.
         """
-
-        self.set_state('busy')
-        self.set_current_job_id(job.id)
-        self.heartbeat((job.timeout or 180) + 60)
-
         self.procline('Processing %s from %s since %s' % (
             job.func_name,
             job.origin, time.time()))
 
-        with self.connection._pipeline() as pipeline:
-            try:
-                with self.death_penalty_class(job.timeout or self.queue_class.DEFAULT_TIMEOUT):
-                    rv = job.perform()
+        try:
+            # I have DISABLED the time limit!
+            rv = job.perform()
 
-                # Pickle the result in the same try-except block since we need to
-                # use the same exc handling when pickling fails
-                job._result = rv
+            # Pickle the result in the same try-except block since we need to
+            # use the same exc handling when pickling fails
+            job._result = rv
+            self.set_state(Status.FINISHED)
+            job.ended_at = times.now()
 
-                self.set_current_job_id(None, pipeline=pipeline)
+            result_ttl = job.get_ttl(self.default_result_ttl)
+            pipeline = self.connection._pipeline()
+            if result_ttl != 0:
+                job.save(pipeline=pipeline)
+            job.cleanup(result_ttl, pipeline=pipeline)
+            pipeline.execute()
 
-                result_ttl = job.get_ttl(self.default_result_ttl)
-                if result_ttl != 0:
-                    job.save(pipeline=pipeline)
-                job.cleanup(result_ttl, pipeline=pipeline)
-
-                pipeline.execute()
-
-            except Exception:
-                # Use the public setter here, to immediately update Redis
-                job.set_status(Status.FAILED)
-                self.handle_exception(job, *sys.exc_info())
-                return False
+        except:
+            # Use the public setter here, to immediately update Redis
+            self.set_state(Status.FAILED)
+            self.handle_exception(job, *sys.exc_info())
+            return False
 
         if rv is None:
             self.log.info('Job OK')
