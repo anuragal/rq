@@ -1,4 +1,4 @@
-UPDATE: Update rq/worker.py to remove os.fork() calls so that this code can work on windows.
+UPDATE: Update rq/worker.py to remove os.fork() calls so that this code can work on windows. Currently this code is working fine on windows but sometimes worker needs to be restarted as it is not picking the tasks.
 
 RQ (_Redis Queue_) is a simple Python library for queueing jobs and processing
 them in the background with workers.  It is backed by Redis and it is designed
